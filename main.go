@@ -4,17 +4,25 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
+
+	"github.com/aws/aws-lambda-go/lambdacontext"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/iot"
 	"github.com/aws/aws-sdk-go/service/s3"
 
 	"github.com/mitchellh/mapstructure"
 	uuid "github.com/satori/go.uuid"
 
 	"github.com/aws/aws-lambda-go/lambda"
+)
+
+var (
+	accountID string
 )
 
 //Event The struct representation of the input from Cognito when a user is confirmed
@@ -39,14 +47,37 @@ type Event struct {
 
 //User the representation of a user to put into DynamoDB
 type User struct {
-	Email     string `json:"email"`
-	Sub       string `json:"sub"`
-	CompanyID string `json:"company_id"`
-	UserName  string `json:"user_name"`
+	Email       string `json:"email"`
+	Sub         string `json:"sub"`
+	CompanyID   string `json:"company_id"`
+	UserName    string `json:"user_name"`
+	Payed       bool   `json:"payed"`
+	ServiceTier int    `json:"service_tier"`
+	Role        string `json:"role"`
+}
+
+//Creater the IoT certificate for the company to be stored in dynamo
+type Certificate struct {
+	CompanyID      *string `json:"company_id"`
+	CreatedBy      *string `json:"sub"`
+	CertificateArn *string `json:"certificate_arn"`
+	CertificateId  *string `json:"certificate_id"`
+	CertificatePem *string `json:"certificate_pem"`
+	PrivateKey     *string `json:"private_key"`
+	PublicKey      *string `json:"public_key"`
+}
+
+//Create a thing for the company
+type RSThing struct {
+	CompanyID *string                `json:"company_id"`
+	CreatedBy *string                `json:"sub"`
+	Thing     *iot.CreateThingOutput `json:"thing"`
 }
 
 //HandleRequest handles the request from Cognito
 func HandleRequest(ctx context.Context, event interface{}) (interface{}, error) {
+	lc, _ := lambdacontext.FromContext(ctx)
+	accountID = strings.Split(lc.InvokedFunctionArn, ":")[4]
 	var eventStruct Event
 	err := mapstructure.Decode(event, &eventStruct)
 	if err != nil {
@@ -61,12 +92,21 @@ func HandleRequest(ctx context.Context, event interface{}) (interface{}, error) 
 	user.CompanyID = uuid
 	user.Email = eventStruct.Request.UserAttributes.Email
 	user.UserName = eventStruct.UserName
+	user.Payed = false
+	user.ServiceTier = 0
+	user.Role = "admin"
 	sess, err := session.NewSession()
 	if err != nil {
 		log.Println(err)
 		return nil, err
 	}
 	err = user.createUserRecord(sess)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+
+	err = user.createIoTCertificate(sess)
 	if err != nil {
 		log.Println(err)
 		return nil, err
@@ -90,10 +130,7 @@ func (user *User) createUserRecord(sess *session.Session) error {
 		TableName: aws.String("users"),
 		Item:      av,
 	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 func (user *User) creatS3Bucket(sess *session.Session) error {
